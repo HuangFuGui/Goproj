@@ -72,8 +72,8 @@ func Set(key, value string) ([]byte, error) {
 	return resp, err
 }
 
-//流水线：一次性发送多个命令，减少客户端与redis服务器之间的网络通信次数来提升redis在执行多个命令时的性能
-//一般一个命令的执行结果并不会影响另一个命令的输入，且一般不需要receive读取结果
+// 流水线：一次性发送多个命令，减少客户端与redis服务器之间的网络通信次数来提升redis在执行多个命令时的性能
+// 一般一个命令的执行结果并不会影响另一个命令的输入，且一般不需要receive读取结果
 func Pipelining(){
 	conn := Pool.Get()
 	defer conn.Close()
@@ -85,7 +85,7 @@ func Pipelining(){
 	conn.Send("incr", "k1")
 	conn.Flush()
 
-	//一般没必要执行receive方法
+	// 一般没必要执行receive方法
 	resp, err := conn.Receive()//resp:OK, err:<nil>
 	fmt.Printf("resp:%v, err:%v\n", resp, err)
 
@@ -93,20 +93,20 @@ func Pipelining(){
 	fmt.Printf("resp:%v, err:%v\n", resp, err)
 }
 
-//redis的事务（multi、exec）要配合watch、unwatch、discard命令使用，否则没有意义
-//把watch去掉库存会出现负数造成超卖的异常情况
+// redis的事务（multi、exec）要配合watch、unwatch、discard命令使用，否则没有意义
+// 把watch去掉库存会出现负数造成超卖的异常情况
 func Transaction(uid int, wg *sync.WaitGroup, casCount *int32) {
 	conn := Pool.Get()
 	defer conn.Close()
 
 	for {
-		//统计所有用户cas次数
+		// 统计所有用户cas次数
 		atomic.AddInt32(casCount, 1)
 
-		//cas开始监听库存
+		// cas开始监听库存
 		conn.Do("watch", "inventory")
 
-		//如果已经没有库存，退出cas抢购
+		// 如果已经没有库存，退出cas抢购
 		resp, _ := redis.Bytes(conn.Do("get", "inventory"))
 		inv, _ := strconv.Atoi(string(resp))
 		if inv <= 0 {
@@ -115,14 +115,14 @@ func Transaction(uid int, wg *sync.WaitGroup, casCount *int32) {
 			break
 		}
 
-		//发送抢购事务命令
+		// 发送抢购事务命令
 		conn.Send("multi")
 		conn.Send("decr", "inventory")
 		conn.Send("rpush", "buyers", uid)
 		queue, _ := conn.Do("exec")
 
-		//若queue不为空，cas成功，当前用户不能再抢购，要break
-		//若queue为空，说明在开始监听库存到exec期间，库存被其他用户（协程）抢先修改，要重试
+		// 若queue不为空，cas成功，当前用户不能再抢购，要break
+		// 若queue为空，说明在开始监听库存到exec期间，库存被其他用户（协程）抢先修改，要重试
 		if queue != nil {
 			fmt.Printf("当前用户（uid：%v)，抢购成功，命令结果：%v\n", uid, queue)
 			break
@@ -131,6 +131,38 @@ func Transaction(uid int, wg *sync.WaitGroup, casCount *int32) {
 		}
 	}
 	wg.Done()
+}
+
+func pub(channelKey string) {
+	conn := Pool.Get()
+	defer conn.Close()
+
+	v := 1
+	for {
+		conn.Do("publish", channelKey, v)
+		time.Sleep(3 * time.Second)
+		v += 1
+	}
+}
+
+func sub(channelKey string) {
+	conn := Pool.Get()
+	defer conn.Close()
+
+	sub := redis.PubSubConn{conn}
+	sub.Subscribe(channelKey)
+	for {
+		switch v := sub.Receive().(type) {
+		case redis.Subscription:
+			fmt.Printf("%v %v %v\n", v.Kind, v.Channel, v.Count)
+		case redis.Message:
+			fmt.Printf("%v %s\n", v.Channel, v.Data)
+		case redis.PMessage:
+			fmt.Printf("%v %v %v\n", v.Pattern, v.Channel, v.Data)
+		case redis.Error:
+			fmt.Printf("%v\n", v)
+		}
+	}
 }
 
 func main() {
@@ -152,14 +184,17 @@ func main() {
 
 	//Pipelining()
 
-	var cliNum int = 10
-	var	casCount int32
-	var wg sync.WaitGroup
-	wg.Add(cliNum)
-	//模拟n用户，内存cas抢购m个商品（n>m），并记录抢购成功的用户id
-	for uid := 1; uid <= cliNum; uid++ {
-		go Transaction(uid, &wg, &casCount)
-	}
-	wg.Wait()
-	fmt.Printf("所有用户cas次数：%v\n", casCount)
+	//var cliNum int = 10
+	//var	casCount int32
+	//var wg sync.WaitGroup
+	//wg.Add(cliNum)
+	//// 模拟n用户，内存cas抢购m个商品（n>m），并记录抢购成功的用户id
+	//for uid := 1; uid <= cliNum; uid++ {
+	//	go Transaction(uid, &wg, &casCount)
+	//}
+	//wg.Wait()
+	//fmt.Printf("所有用户cas次数：%v\n", casCount)
+
+	go pub("ch1")
+	sub("ch1")
 }
